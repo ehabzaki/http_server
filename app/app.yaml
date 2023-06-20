@@ -1,0 +1,142 @@
+---
+# namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend
+---
+#service account 
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app
+  namespace: backend
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::079541103782:role/eks_backend_role
+---
+#deployment to access s3
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aws-cli
+  namespace: backend
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aws-cli
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aws-cli
+    spec:
+      serviceAccountName: app 
+      containers:
+      - name: aws-cli
+        image: amazon/aws-cli:latest
+        command:
+          - sleep
+          - "3600"
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always 
+---
+#deployment of http server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: backend
+  name: app
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app
+    spec:
+      serviceAccountName: app 
+      containers:
+        - name: app
+          imagePullPolicy: Always
+          image: hashicorp/http-echo
+          args:
+            - "-text=Hello World!"
+          volumeMounts:
+            - mountPath: "/usr/share/nginx/html"
+              name: app
+      volumes: 
+        - name: app
+          persistentVolumeClaim:
+            claimName: app-pv-claim
+---
+#service
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: backend
+  name: app
+spec:
+  ports:
+    - port: 80
+      targetPort: 5678
+      protocol: TCP
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: app
+---
+#ingress loadbalancer logs uploaded to s3
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  namespace: backend
+  name: app
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-attributes:
+      access_logs.s3.enabled=true,access_logs.s3.bucket=baqend-bucket,access_logs.s3.prefix=app
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: app
+              port:
+                number: 80
+---
+#storage class efs
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: 
+  name: gp2
+parameters:
+  fsType: ext4
+  type: gp2
+  provisioningMode: efs-ap
+  fileSystemId: fs-0e3695ee4eb1477b0
+  directoryPerms: "700"
+  gidRangeStart: "1000"
+  gidRangeEnd: "2000"
+  basePath: "/dynamic_provisioning"
+
+provisioner: efs.csi.aws.com
+volumeBindingMode: Immediate
+---
+# presisten volume claim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-pv-claim
+spec: 
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp2
+  resources: 
+    requests:
+      storage: 2Gi
